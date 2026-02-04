@@ -1,22 +1,30 @@
+import os
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from datetime import date
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
-TOKEN = "8471405463:AAFi2uwEaEfdMThXB3NtoD1aQlM8ZgYRo-g"
+# --- TOKEN (ENV) ---
+TOKEN = os.getenv("BOT_TOKEN")
 
-# ---- Basit hafıza (RAM) ----
-welcomed_users = set()        # gruba ilk girenler
-daily_greet = {}              # {user_id: tarih}
+# --- Basit hafıza (RAM) ---
+welcomed_users = set()      # gruba ilk girenler
+daily_greet = {}            # {user_id: tarih}
 
-# ---- Çeviri (MyMemory - ücretsiz) ----
-def detect_language(text):
-    tr_chars = "çğıöşüÇĞİÖŞÜ"
+# --- Dil algılama ---
+def detect_language(text: str) -> str:
+    tr_chars = "ğüşöçıİĞÜŞÖÇ"
     if any(c in text for c in tr_chars):
         return "tr"
     return "en"
 
-def translate(text, source, target):
+# --- Çeviri (MyMemory - ücretsiz) ---
+def translate(text: str, source: str, target: str) -> str:
     url = "https://api.mymemory.translated.net/get"
     params = {
         "q": text,
@@ -25,55 +33,69 @@ def translate(text, source, target):
     r = requests.get(url, params=params, timeout=10)
     return r.json()["responseData"]["translatedText"]
 
-# ---- Yeni katılan karşılama ----
+# --- Yeni katılan karşılama ---
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for user in update.message.new_chat_members:
         if user.id not in welcomed_users:
             welcomed_users.add(user.id)
             username = f"@{user.username}" if user.username else user.full_name
 
-            await update.message.reply_text(
+            msg = (
                 f"⚔️ Yeni bir savaşçı geldi: {username} 👑\n\n"
-                "Çeviri botu aktif\n"
-                "Kuralları öğren, keyfine bak 😏"
+                "Çeviri botu aktif 🌍\n"
+                "Kuralları öğren, keyfine bak 😏\n\n"
+                f"🔥 {username}\n\n"
+                "Bugün etkinlikte ne vardı?\n"
+                "Epik düştü mü? 👑"
             )
 
-# ---- Mesaj yakalama ----
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text or update.message.from_user.is_bot:
-        return
+            await update.message.reply_text(msg)
 
-    user = update.message.from_user
-    text = update.message.text
+# --- Günlük ilk mesaj selamı ---
+async def daily_hello(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     today = date.today()
 
-    # Günlük ilk mesaj kontrolü
     if daily_greet.get(user.id) != today:
         daily_greet[user.id] = today
-        username = f"@{user.username}" if user.username else user.full_name
-
         await update.message.reply_text(
-            f"🔥 {username}\n\n"
-            "Bugün etkinlikte ne vardı?\n"
-            "Epik düştü mü? 👑"
+            f"👋 Selam {user.first_name}!\n"
+            "Bugün klana girdin mi?\n"
+            "Epik kestin mi? 😎"
         )
 
-    # Otomatik çeviri
-    try:
-        lang = detect_language(text)
-        if lang == "en":
-            translated = translate(text, "en", "tr")
-        else:
-            translated = translate(text, "tr", "en")
+# --- Otomatik çeviri ---
+async def auto_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
 
-        await update.message.reply_text(translated)
-    except:
+    text = update.message.text
+
+    # komutları çevirme
+    if text.startswith("/"):
+        return
+
+    source = detect_language(text)
+    target = "en" if source == "tr" else "tr"
+
+    try:
+        translated = translate(text, source, target)
+        if translated.lower() != text.lower():
+            await update.message.reply_text(
+                f"🌍 {translated}"
+            )
+    except Exception:
         pass
 
-# ---- Botu başlat ----
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# --- MAIN ---
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
 
-print("👑 Elit çeviri + karşılama botu çalışıyor")
-app.run_polling()
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, daily_hello))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, auto_translate))
+
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
