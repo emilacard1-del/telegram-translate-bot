@@ -1,101 +1,129 @@
 import os
-import requests
-from datetime import date
+import logging
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
-    MessageHandler,
     ContextTypes,
-    filters
+    MessageHandler,
+    CommandHandler,
+    filters,
 )
 
-# --- TOKEN (ENV) ---
-TOKEN = os.getenv("BOT_TOKEN")
+from deep_translator import GoogleTranslator
 
-# --- Basit hafıza (RAM) ---
-welcomed_users = set()      # gruba ilk girenler
-daily_greet = {}            # {user_id: tarih}
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
-# --- Dil algılama ---
-def detect_language(text: str) -> str:
-    tr_chars = "ğüşöçıİĞÜŞÖÇ"
-    if any(c in text for c in tr_chars):
-        return "tr"
-    return "en"
+def env(name: str, default: str | None = None) -> str | None:
+    v = os.getenv(name)
+    return v if v is not None and v.strip() != "" else default
 
-# --- Çeviri (MyMemory - ücretsiz) ---
-def translate(text: str, source: str, target: str) -> str:
-    url = "https://api.mymemory.translated.net/get"
-    params = {
-        "q": text,
-        "langpair": f"{source}|{target}"
-    }
-    r = requests.get(url, params=params, timeout=10)
-    return r.json()["responseData"]["translatedText"]
+BOT_TOKEN = env("BOT_TOKEN")
+TARGET_LANG = (env("TARGET_LANG", "tr") or "tr").lower()   # hedef dil: tr, en, de...
+MAX_LEN = int(env("MAX_MESSAGE_LEN", "3500") or "3500")    # telegram sınırlarına takılmamak için
 
-# --- Yeni katılan karşılama ---
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for user in update.message.new_chat_members:
-        if user.id not in welcomed_users:
-            welcomed_users.add(user.id)
-            username = f"@{user.username}" if user.username else user.full_name
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN env variable is missing. Set BOT_TOKEN in your host panel.")
 
-            msg = (
-                f"⚔️ Yeni bir savaşçı geldi: {username} 👑\n\n"
-                "Çeviri botu aktif 🌍\n"
-                "Kuralları öğren, keyfine bak 😏\n\n"
-                f"🔥 {username}\n\n"
-                "Bugün etkinlikte ne vardı?\n"
-                "Epik düştü mü? 👑"
-            )
+translator = GoogleTranslator(source="auto", target=TARGET_LANG)
 
-            await update.message.reply_text(msg)
+def split_text(text: str, limit: int = 3500) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    current = []
+    current_len = 0
+    for line in text.splitlines(True):
+        if current_len + len(line) > limit:
+            parts.append("".join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += len(line)
+    if current:
+        parts.append("".join(current))
+    return parts
 
-# --- Günlük ilk mesaj selamı ---
-async def daily_hello(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    today = date.today()
+def should_ignore(text: str) -> bool:
+    t = text.strip()
+    if not t:
+        return True
+    # Komutları çevirme
+    if t.startswith("/"):
+        return True
+    return False
 
-    if daily_greet.get(user.id) != today:
-        daily_greet[user.id] = today
-        await update.message.reply_text(
-            f"👋 Selam {user.first_name}!\n"
-            "Bugün klana girdin mi?\n"
-            "Epik kestin mi? 😎"
-        )
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        f"Merhaba! Bana yazdığın mesajları otomatik olarak '{TARGET_LANG}' diline çeviririm.\n\n"
+        "Ayarlar:\n"
+        f"- TARGET_LANG={TARGET_LANG}\n"
+        "Komutlar: /start /lang <kod> /help"
+    )
 
-# --- Otomatik çeviri ---
-async def auto_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Kullanım:\n"
+        "- Normal mesaj gönder → çeviririm\n"
+        "- /lang en  (hedef dili değiştirir)\n\n"
+        "Dil kodları örnek: tr, en, de, fr, es, ru, ar"
+    )
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global translator, TARGET_LANG
+    if not context.args:
+        await update.message.reply_text(f"Mevcut hedef dil: {TARGET_LANG}\nÖrn: /lang en")
         return
 
-    text = update.message.text
-
-    # komutları çevirme
-    if text.startswith("/"):
+    code = context.args[0].strip().lower()
+    if len(code) < 2 or len(code) > 8:
+        await update.message.reply_text("Geçersiz dil kodu. Örn: /lang en")
         return
 
-    source = detect_language(text)
-    target = "en" if source == "tr" else "tr"
+    TARGET_LANG = code
+    translator = GoogleTranslator(source="auto", target=TARGET_LANG)
+    await update.message.reply_text(f"Hedef dil güncellendi: {TARGET_LANG}")
+
+async def translate_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    if not msg or msg.text is None:
+        return
+
+    text = msg.text
+    if should_ignore(text):
+        return
 
     try:
-        translated = translate(text, source, target)
-        if translated.lower() != text.lower():
-            await update.message.reply_text(
-                f"🌍 {translated}"
-            )
-    except Exception:
-        pass
+        translated = translator.translate(text)
+        if not translated:
+            return
 
-# --- MAIN ---
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+        # Aynı çıktı geldiyse spam yapma
+        if translated.strip() == text.strip():
+            return
 
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, daily_hello))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, auto_translate))
+        for chunk in split_text(translated, MAX_LEN):
+            await msg.reply_text(chunk)
 
-    app.run_polling()
+    except Exception as e:
+        logging.exception("Translation error: %s", e)
+        await msg.reply_text("Çeviri sırasında hata oldu. Lütfen tekrar dene.")
+
+def main() -> None:
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("lang", lang_cmd))
+
+    # Sadece yazı mesajları
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_message))
+
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
